@@ -1,0 +1,76 @@
+---
+job: actions
+
+kubernetes:
+  cloud: swx-k8s-spray
+
+volumes:
+  - {mountPath: /hpc/local, hostPath: /hpc/local}
+  - {mountPath: /auto/sw_tools, hostPath: /auto/sw_tools}
+  - {mountPath: /.autodirect/mtrswgwork, hostPath: /.autodirect/mtrswgwork}
+  - {mountPath: /.autodirect/sw/release, hostPath: /.autodirect/sw/release}
+
+runs_on_dockers:
+  - {name: 'blackduck', url: 'harbor.mellanox.com/toolbox/ngci-centos:latest', category: 'tool', arch: 'x86_64'}
+  - {name: 'coverity', url: 'harbor.mellanox.com/swx-storage/ci-demo/x86_64/centos7-7:latest', category: 'tool', arch: 'x86_64'}
+  - {name: 'builder', url: 'harbor.mellanox.com/swx-storage/ci-demo/x86_64/centos7-7:latest', arch: 'x86_64'}
+
+credentials:
+  - {credentialsId: '311997c9-cc1c-4d5d-8ba2-6eb43ba0a06d', usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASS'}
+
+env:
+  NEXUS_URL: http://swx-repos.mtr.labs.mlnx:8081/
+
+steps:
+
+  - name: Nexus upload rpm
+    credentialsId: '311997c9-cc1c-4d5d-8ba2-6eb43ba0a06d'
+    resource: actions/nexus.py
+    containerSelector: "{name: 'builder'}"
+    run: |
+      echo "./build_package.sh"
+      echo ".ci/actions/nexus.py yum -u $NEXUS_URL -U $NEXUS_USER -P $NEXUS_PASS -a upload -n test_yum_repo --file /tmp/mlnx-libsnap-1.0.1-16.mlnx.x86_64.rpm --upload_path 7/x86_64/"
+
+  - name: Coverity embed
+    resource: actions/coverity.sh
+    containerSelector: "{name: 'coverity'}"
+    run: |
+      echo Running action script:
+      ./autogen.sh
+      ./configure
+      make -j 3 clean ||:
+      .ci/actions/coverity.sh --build_script 'make -j 3' --ignore_files 'devx googletest tests'
+
+  - name: Coverity scan
+    shell: action
+    module: dynamicAction
+    run: coverity.sh 
+    containerSelector: "{name: 'coverity'}"
+    args:
+      - "--pre_script './autogen.sh;./configure;make -j 3 clean'"
+      - "--build_script 'make -j 3'"
+      - "--ignore_files 'devx googletest tests'"
+    archiveArtifacts: 'cov.log'
+
+  - name: Blackduck scan source
+    containerSelector: "{name: 'blackduck'}"
+    shell: action
+    module: ngci
+    run: NGCIBlackDuckScan
+    args:
+      projectName: "NGCIBlackDuckScan"
+      projectVersion: "ci-demo"
+      projectVersion: "1.0"
+      projectSrcPath: "${WORKSPACE}/src"
+      attachArtifact: true
+      reportName: "BlackDuck report"
+      scanMode: "source"
+    env:
+      SPRING_APPLICATION_JSON: '{"blackduck.url":"https://blackduck.mellanox.com/","blackduck.api.token":"ODMwOWYwMzEtODA2ZC00MzBjLWI1ZDEtNmFiMjBkYzQzMzkwOjNmNjExN2M1LWE2ZmEtNDZlYS1hZjRiLTZlNDgwNjAwOTVjNw=="}'
+
+  - name: Trigger external job
+    containerSelector: "{name: 'blackduck'}"
+    shell: action
+    module: groovy
+    run: |
+      build job: 'cidemo-trigger-test', wait: true
